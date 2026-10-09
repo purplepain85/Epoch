@@ -1,0 +1,138 @@
+#!/data/data/com.termux/files/usr/bin/python
+"""botctl — bot tracker. Data lives under ~/epoch/bots/."""
+import json, os, signal, subprocess, sys, time
+from pathlib import Path
+
+HOME = Path.home()
+BOTS = HOME / "epoch" / "bots"
+REG = BOTS / "registry.json"
+PIDS = BOTS / "pids"
+LOGS = BOTS / "logs"
+BOTS.mkdir(parents=True, exist_ok=True)
+PIDS.mkdir(parents=True, exist_ok=True)
+LOGS.mkdir(parents=True, exist_ok=True)
+if not REG.exists():
+    REG.write_text("{}")
+
+
+def load(): return json.loads(REG.read_text())
+def save(d): REG.write_text(json.dumps(d, indent=2))
+
+
+def is_alive(pid):
+    if not pid: return False
+    try:
+        os.kill(pid, 0); return True
+    except Exception: return False
+
+
+def read_pid(name):
+    p = PIDS / f"{name}.pid"
+    if not p.exists(): return None
+    try: return int(p.read_text().strip())
+    except Exception: return None
+
+
+def bot_status(name):
+    pid = read_pid(name)
+    if pid and is_alive(pid): return "running", pid
+    if pid: return "dead", pid
+    return "stopped", None
+
+
+def cmd_list():
+    d = load()
+    if not d:
+        print("no bots registered"); return
+    print(f"{'name':<22} {'status':<10} {'pid':<8}")
+    print("-" * 50)
+    for name in sorted(d):
+        st, pid = bot_status(name)
+        print(f"{name:<22} {st:<10} {str(pid or '-'):<8}")
+
+
+def cmd_status(name):
+    d = load()
+    if name not in d: print(f"unknown: {name}"); return
+    st, pid = bot_status(name)
+    print(json.dumps({"name": name, "status": st, "pid": pid, **d[name]}, indent=2))
+
+
+def cmd_start(name):
+    d = load()
+    if name not in d: print(f"unknown: {name}"); return
+    entry = d[name]
+    st, pid = bot_status(name)
+    if st == "running": print(f"{name} already running ({pid})"); return
+    script = entry["script"]
+    args = entry.get("args", [])
+    cwd = entry.get("cwd") or str(Path(script).parent)
+    log = LOGS / f"{name}.log"
+    cmd = [sys.executable, script, *args] if script.endswith(".py") else [script, *args]
+    with log.open("ab") as lf:
+        proc = subprocess.Popen(cmd, cwd=cwd, stdout=lf, stderr=lf,
+                                stdin=subprocess.DEVNULL, start_new_session=True)
+    (PIDS / f"{name}.pid").write_text(str(proc.pid))
+    print(f"started {name} (pid {proc.pid}), log {log}")
+
+
+def cmd_stop(name):
+    pid = read_pid(name)
+    if not pid or not is_alive(pid):
+        print(f"{name} not running")
+        (PIDS / f"{name}.pid").unlink(missing_ok=True); return
+    try: os.killpg(os.getpgid(pid), signal.SIGTERM)
+    except Exception: os.kill(pid, signal.SIGTERM)
+    time.sleep(1)
+    if is_alive(pid):
+        try: os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except Exception: os.kill(pid, signal.SIGKILL)
+    (PIDS / f"{name}.pid").unlink(missing_ok=True)
+    print(f"stopped {name}")
+
+
+def cmd_restart(name):
+    cmd_stop(name); time.sleep(0.5); cmd_start(name)
+
+
+def cmd_tail(name, n=30):
+    log = LOGS / f"{name}.log"
+    if not log.exists(): print(f"no log for {name}"); return
+    for line in log.read_text(errors="replace").splitlines()[-int(n):]:
+        print(line)
+
+
+def cmd_add(name, script, *args):
+    d = load()
+    d[name] = {
+        "script": str(Path(script).resolve()),
+        "args": list(args),
+        "cwd": str(Path(script).resolve().parent),
+        "description": "",
+    }
+    save(d); print(f"registered {name}")
+
+
+def cmd_remove(name):
+    d = load()
+    if name in d: del d[name]; save(d); print(f"removed {name}")
+    else: print(f"unknown: {name}")
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__); return
+    cmd = sys.argv[1]
+    if cmd == "list": cmd_list()
+    elif cmd == "status": cmd_status(sys.argv[2])
+    elif cmd == "start": cmd_start(sys.argv[2])
+    elif cmd == "stop": cmd_stop(sys.argv[2])
+    elif cmd == "restart": cmd_restart(sys.argv[2])
+    elif cmd == "tail": cmd_tail(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else 30)
+    elif cmd == "add": cmd_add(*sys.argv[2:])
+    elif cmd == "remove": cmd_remove(sys.argv[2])
+    else: print(f"unknown: {cmd}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,8 @@
+data/
+backups/
+test_tmp/
+*.log
+signal
+__pycache__/
+*.pyc
+*.bak
